@@ -5,6 +5,7 @@ import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 
 import type {CompiledInstruction} from './message';
+import { torusNacl } from './torus-nacl';
 import {Message} from './message';
 import {PublicKey} from './publickey';
 import {Account} from './account';
@@ -350,8 +351,8 @@ export class Transaction {
    *
    * The Transaction must be assigned a valid `recentBlockhash` before invoking this method
    */
-  sign(...signers: Array<Account>) {
-    this.signPartial(...signers);
+  async sign(...signers: Array<Account>) {
+    return this.signPartial(...signers);
   }
 
   /**
@@ -362,36 +363,50 @@ export class Transaction {
    *
    * All the caveats from the `sign` method apply to `signPartial`
    */
-  signPartial(...partialSigners: Array<PublicKey | Account>) {
+  async signPartial(...partialSigners: Array<PublicKey | Account>) {
     if (partialSigners.length === 0) {
       throw new Error('No signers');
     }
-    const signatures: Array<SignaturePubkeyPair> = partialSigners.map(
-      accountOrPublicKey => {
-        const publicKey =
-          accountOrPublicKey instanceof Account
-            ? accountOrPublicKey.publicKey
-            : accountOrPublicKey;
+    const signatures: Array<SignaturePubkeyPair> = await Promise.all(partialSigners.map(
+      async accountOrPublicKey => {
+        let publicKey;
+        if (accountOrPublicKey instanceof Account) {
+          if (accountOrPublicKey._isTorus) {
+            publicKey = await accountOrPublicKey.asyncPublicKey();
+          } else {
+            publicKey = accountOrPublicKey.publicKey;
+          }
+        } else {
+          publicKey = accountOrPublicKey;
+        }
         return {
           signature: null,
           publicKey,
         };
       },
-    );
+    ));
     this.signatures = signatures;
     const signData = this.serializeMessage();
 
-    partialSigners.forEach((accountOrPublicKey, index) => {
+    await Promise.all(partialSigners.map(async (accountOrPublicKey, index) => {
       if (accountOrPublicKey instanceof PublicKey) {
         return;
       }
-      const signature = nacl.sign.detached(
-        signData,
-        accountOrPublicKey.secretKey,
-      );
+      let signature;
+      if (accountOrPublicKey._isTorus) {
+        signature = await torusNacl.sign.asyncDetached(
+          signData,
+          await accountOrPublicKey.asyncPublicKey()
+        );
+      } else {
+        signature = nacl.sign.detached(
+          signData,
+          accountOrPublicKey.secretKey,
+        );
+      }
       invariant(signature.length === 64);
       signatures[index].signature = Buffer.from(signature);
-    });
+    }));
   }
 
   /**
