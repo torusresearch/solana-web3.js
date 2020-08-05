@@ -1,15 +1,16 @@
 // @flow
 
-import invariant from 'assert';
-import nacl from 'tweetnacl';
-import bs58 from 'bs58';
+import invariant from "assert";
+import nacl from "tweetnacl";
+import bs58 from "bs58";
 
-import type {CompiledInstruction} from './message';
-import {Message} from './message';
-import {PublicKey} from './publickey';
-import {Account} from './account';
-import * as shortvec from './util/shortvec-encoding';
-import type {Blockhash} from './blockhash';
+import type {CompiledInstruction} from "./message";
+import {torusNacl} from "./torus-nacl";
+import {Message} from "./message";
+import {PublicKey} from "./publickey";
+import {Account} from "./account";
+import * as shortvec from "./util/shortvec-encoding";
+import type {Blockhash} from "./blockhash";
 
 /**
  * @typedef {string} TransactionSignature
@@ -168,19 +169,15 @@ export class Transaction {
   /**
    * Add one or more instructions to this Transaction
    */
-  add(
-    ...items: Array<
-      Transaction | TransactionInstruction | TransactionInstructionCtorFields,
-    >
-  ): Transaction {
+  add(...items: Array<Transaction | TransactionInstruction | TransactionInstructionCtorFields>): Transaction {
     if (items.length === 0) {
-      throw new Error('No instructions');
+      throw new Error("No instructions");
     }
 
     items.forEach((item: any) => {
-      if ('instructions' in item) {
+      if ("instructions" in item) {
         this.instructions = this.instructions.concat(item.instructions);
-      } else if ('data' in item && 'programId' in item && 'keys' in item) {
+      } else if ("data" in item && "programId" in item && "keys" in item) {
         this.instructions.push(item);
       } else {
         this.instructions.push(new TransactionInstruction(item));
@@ -200,11 +197,11 @@ export class Transaction {
     }
     const {recentBlockhash} = this;
     if (!recentBlockhash) {
-      throw new Error('Transaction recentBlockhash required');
+      throw new Error("Transaction recentBlockhash required");
     }
 
     if (this.instructions.length < 1) {
-      throw new Error('No instructions provided');
+      throw new Error("No instructions provided");
     }
 
     let numReadonlySignedAccounts = 0;
@@ -237,8 +234,7 @@ export class Transaction {
     // Sort. Prioritizing first by signer, then by writable
     accountMetas.sort(function (x, y) {
       const checkSigner = x.isSigner === y.isSigner ? 0 : x.isSigner ? -1 : 1;
-      const checkWritable =
-        x.isWritable === y.isWritable ? 0 : x.isWritable ? -1 : 1;
+      const checkWritable = x.isWritable === y.isWritable ? 0 : x.isWritable ? -1 : 1;
       return checkSigner || checkWritable;
     });
 
@@ -250,8 +246,7 @@ export class Transaction {
         return x.pubkey.toString() === pubkeyString;
       });
       if (uniqueIndex > -1) {
-        uniqueMetas[uniqueIndex].isWritable =
-          uniqueMetas[uniqueIndex].isWritable || accountMeta.isWritable;
+        uniqueMetas[uniqueIndex].isWritable = uniqueMetas[uniqueIndex].isWritable || accountMeta.isWritable;
       } else {
         uniqueMetas.push(accountMeta);
       }
@@ -302,18 +297,14 @@ export class Transaction {
     }
 
     const accountKeys = signedKeys.concat(unsignedKeys);
-    const instructions: CompiledInstruction[] = this.instructions.map(
-      instruction => {
-        const {data, programId} = instruction;
-        return {
-          programIdIndex: accountKeys.indexOf(programId.toString()),
-          accounts: instruction.keys.map(keyObj =>
-            accountKeys.indexOf(keyObj.pubkey.toString()),
-          ),
-          data: bs58.encode(data),
-        };
-      },
-    );
+    const instructions: CompiledInstruction[] = this.instructions.map(instruction => {
+      const {data, programId} = instruction;
+      return {
+        programIdIndex: accountKeys.indexOf(programId.toString()),
+        accounts: instruction.keys.map(keyObj => accountKeys.indexOf(keyObj.pubkey.toString())),
+        data: bs58.encode(data),
+      };
+    });
 
     instructions.forEach(instruction => {
       invariant(instruction.programIdIndex >= 0);
@@ -350,8 +341,8 @@ export class Transaction {
    *
    * The Transaction must be assigned a valid `recentBlockhash` before invoking this method
    */
-  sign(...signers: Array<Account>) {
-    this.signPartial(...signers);
+  async sign(...signers: Array<Account>) {
+    return this.signPartial(...signers);
   }
 
   /**
@@ -362,44 +353,46 @@ export class Transaction {
    *
    * All the caveats from the `sign` method apply to `signPartial`
    */
-  signPartial(...partialSigners: Array<PublicKey | Account>) {
+  async signPartial(...partialSigners: Array<PublicKey | Account>) {
     if (partialSigners.length === 0) {
-      throw new Error('No signers');
+      throw new Error("No signers");
     }
-
-    function partialSignerPublicKey(accountOrPublicKey: any): PublicKey {
-      if ('publicKey' in accountOrPublicKey) {
-        return accountOrPublicKey.publicKey;
-      }
-      return accountOrPublicKey;
-    }
-
-    function signerAccount(accountOrPublicKey: any): ?Account {
-      if (
-        'publicKey' in accountOrPublicKey &&
-        'secretKey' in accountOrPublicKey
-      ) {
-        return accountOrPublicKey;
-      }
-    }
-
-    const signatures: Array<SignaturePubkeyPair> = partialSigners.map(
-      accountOrPublicKey => ({
-        signature: null,
-        publicKey: partialSignerPublicKey(accountOrPublicKey),
+    const signatures: Array<SignaturePubkeyPair> = await Promise.all(
+      partialSigners.map(async accountOrPublicKey => {
+        let publicKey;
+        if (accountOrPublicKey instanceof Account) {
+          if (accountOrPublicKey._isTorus) {
+            publicKey = await accountOrPublicKey.asyncPublicKey();
+          } else {
+            publicKey = accountOrPublicKey.publicKey;
+          }
+        } else {
+          publicKey = accountOrPublicKey;
+        }
+        return {
+          signature: null,
+          publicKey,
+        };
       }),
     );
     this.signatures = signatures;
     const signData = this.serializeMessage();
 
-    partialSigners.forEach((accountOrPublicKey, index) => {
-      const account = signerAccount(accountOrPublicKey);
-      if (account) {
-        const signature = nacl.sign.detached(signData, account.secretKey);
+    await Promise.all(
+      partialSigners.map(async (accountOrPublicKey, index) => {
+        if (accountOrPublicKey instanceof PublicKey) {
+          return;
+        }
+        let signature;
+        if (accountOrPublicKey._isTorus) {
+          signature = await torusNacl.sign.asyncDetached(signData, await accountOrPublicKey.asyncPublicKey());
+        } else {
+          signature = nacl.sign.detached(signData, accountOrPublicKey.secretKey);
+        }
         invariant(signature.length === 64);
         signatures[index].signature = Buffer.from(signature);
-      }
-    });
+      }),
+    );
   }
 
   /**
@@ -419,9 +412,7 @@ export class Transaction {
   addSignature(pubkey: PublicKey, signature: Buffer) {
     invariant(signature.length === 64);
 
-    const index = this.signatures.findIndex(sigpair =>
-      pubkey.equals(sigpair.publicKey),
-    );
+    const index = this.signatures.findIndex(sigpair => pubkey.equals(sigpair.publicKey));
     if (index < 0) {
       throw new Error(`Unknown signer: ${pubkey.toString()}`);
     }
@@ -436,9 +427,7 @@ export class Transaction {
     let verified = true;
     const signData = this.serializeMessage();
     for (const {signature, publicKey} of this.signatures) {
-      if (
-        !nacl.sign.detached.verify(signData, signature, publicKey.toBuffer())
-      ) {
+      if (!nacl.sign.detached.verify(signData, signature, publicKey.toBuffer())) {
         verified = false;
       }
     }
@@ -453,34 +442,24 @@ export class Transaction {
   serialize(): Buffer {
     const {signatures} = this;
     if (!signatures || signatures.length === 0 || !this.verifySignatures()) {
-      throw new Error('Transaction has not been signed');
+      throw new Error("Transaction has not been signed");
     }
 
     const signData = this.serializeMessage();
     const signatureCount = [];
     shortvec.encodeLength(signatureCount, signatures.length);
-    const transactionLength =
-      signatureCount.length + signatures.length * 64 + signData.length;
+    const transactionLength = signatureCount.length + signatures.length * 64 + signData.length;
     const wireTransaction = Buffer.alloc(transactionLength);
     invariant(signatures.length < 256);
     Buffer.from(signatureCount).copy(wireTransaction, 0);
     signatures.forEach(({signature}, index) => {
       if (signature !== null) {
         invariant(signature.length === 64, `signature has invalid length`);
-        Buffer.from(signature).copy(
-          wireTransaction,
-          signatureCount.length + index * 64,
-        );
+        Buffer.from(signature).copy(wireTransaction, signatureCount.length + index * 64);
       }
     });
-    signData.copy(
-      wireTransaction,
-      signatureCount.length + signatures.length * 64,
-    );
-    invariant(
-      wireTransaction.length <= PACKET_DATA_SIZE,
-      `Transaction too large: ${wireTransaction.length} > ${PACKET_DATA_SIZE}`,
-    );
+    signData.copy(wireTransaction, signatureCount.length + signatures.length * 64);
+    invariant(wireTransaction.length <= PACKET_DATA_SIZE, `Transaction too large: ${wireTransaction.length} > ${PACKET_DATA_SIZE}`);
     return wireTransaction;
   }
 
@@ -578,10 +557,7 @@ export class Transaction {
     transaction.recentBlockhash = message.recentBlockhash;
     signatures.forEach((signature, index) => {
       const sigPubkeyPair = {
-        signature:
-          signature == bs58.encode(DEFAULT_SIGNATURE)
-            ? null
-            : bs58.decode(signature),
+        signature: signature == bs58.encode(DEFAULT_SIGNATURE) ? null : bs58.decode(signature),
         publicKey: message.accountKeys[index],
       };
       transaction.signatures.push(sigPubkeyPair);
@@ -592,9 +568,7 @@ export class Transaction {
         const pubkey = message.accountKeys[account];
         return {
           pubkey,
-          isSigner: transaction.signatures.some(
-            keyObj => keyObj.publicKey.toString() === pubkey.toString(),
-          ),
+          isSigner: transaction.signatures.some(keyObj => keyObj.publicKey.toString() === pubkey.toString()),
           isWritable: message.isAccountWritable(account),
         };
       });
