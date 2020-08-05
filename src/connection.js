@@ -1944,7 +1944,7 @@ export class Connection {
     options?: SendOptions,
   ): Promise<TransactionSignature> {
     if (transaction.nonceInfo) {
-      transaction.sign(...signers);
+      await transaction.sign(...signers);
     } else {
       for (;;) {
         // Attempt to use a recent blockhash for up to 30 seconds
@@ -1954,7 +1954,7 @@ export class Connection {
             BLOCKHASH_CACHE_TIMEOUT_MS
         ) {
           transaction.recentBlockhash = this._blockhashInfo.recentBlockhash;
-          transaction.sign(...signers);
+          await transaction.sign(...signers);
           if (!transaction.signature) {
             throw new Error('!signature'); // should never happen
           }
